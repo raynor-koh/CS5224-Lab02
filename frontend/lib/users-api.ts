@@ -1,4 +1,4 @@
-import type { StatsResponse, UserListResponse } from "@/types/users";
+import type { AllStatsPageResponse, StatsResponse, UserListResponse } from "@/types/users";
 import { USER_PAGE_SIZE } from "@/types/users";
 
 function getApiBaseUrl() {
@@ -33,4 +33,16 @@ export async function fetchUserStats(userIds: string[]): Promise<StatsResponse> 
   }
 
   return (await response.json()) as StatsResponse;
+}
+
+export async function fetchAllUserStats(cursor?: string): Promise<AllStatsPageResponse> {
+  const baseUrl = getApiBaseUrl();
+  if (!baseUrl) throw new Error("Set NEXT_PUBLIC_API_BASE_URL in frontend/.env.local.");
+
+  const params = new URLSearchParams({ limit: String(USER_PAGE_SIZE) });
+  if (cursor) params.set("cursor", cursor);
+
+  const response = await fetch(`${baseUrl}/api/users/stats?${params}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Could not load user statistics (API ${response.status}).`);
+  return (await response.json()) as AllStatsPageResponse;
 }

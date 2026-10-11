@@ -14,5 +14,10 @@ export type StatsResponse = {
   missingUserIds: string[];
 };
 
+export type AllStatsPageResponse = {
+  users: UserStats[];
+  nextCursor: string;
+};
+
 export const MAX_SELECTED_USERS = 100;
 export const USER_PAGE_SIZE = 100;

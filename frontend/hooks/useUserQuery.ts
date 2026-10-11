@@ -1,12 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { fetchUserStats, fetchUsers } from "@/lib/users-api";
-import { MAX_SELECTED_USERS, type UserStats } from "@/types/users";
+import { fetchAllUserStats, fetchUserStats, fetchUsers } from "@/lib/users-api";
+import { MAX_SELECTED_USERS, type AllStatsPageResponse, type UserListResponse, type UserStats } from "@/types/users";
 
 export function useUserQuery() {
-  const [availableUsers, setAvailableUsers] = useState<string[]>([]);
-  const [nextCursor, setNextCursor] = useState("");
+  const [pages, setPages] = useState<UserListResponse[]>([]);
+  const [pageIndex, setPageIndex] = useState(0);
   const [selectedUsers, setSelectedUsers] = useState<string[]>([]);
   const [stats, setStats] = useState<UserStats[]>([]);
   const [missingUsers, setMissingUsers] = useState<string[]>([]);
@@ -15,17 +15,19 @@ export function useUserQuery() {
   const [listLoading, setListLoading] = useState(true);
   const [querying, setQuerying] = useState(false);
   const [hasQueried, setHasQueried] = useState(false);
+  const [statsMode, setStatsMode] = useState<"selected" | "all">("selected");
+  const [allStatsPages, setAllStatsPages] = useState<AllStatsPageResponse[]>([]);
+  const [allStatsPageIndex, setAllStatsPageIndex] = useState(0);
+  const [allStatsLoading, setAllStatsLoading] = useState(false);
+  const [allStatsError, setAllStatsError] = useState("");
 
-  const loadUsers = useCallback(async (cursor?: string) => {
+  const loadFirstPage = useCallback(async () => {
     setListLoading(true);
     setListError("");
     try {
-      const page = await fetchUsers(cursor);
-      setAvailableUsers((current) => {
-        const known = new Set(current);
-        return [...current, ...page.userIds.filter((userId) => !known.has(userId))];
-      });
-      setNextCursor(page.nextCursor ?? "");
+      const page = await fetchUsers();
+      setPages([page]);
+      setPageIndex(0);
     } catch (cause) {
       setListError(
         cause instanceof Error
@@ -42,8 +44,7 @@ export function useUserQuery() {
     void fetchUsers()
       .then((page) => {
         if (!active) return;
-        setAvailableUsers(page.userIds);
-        setNextCursor(page.nextCursor ?? "");
+        setPages([page]);
         setListError("");
       })
       .catch((cause: unknown) => {
@@ -56,7 +57,42 @@ export function useUserQuery() {
     return () => { active = false; };
   }, []);
 
+  const nextPage = useCallback(async () => {
+    if (listLoading) return;
+    if (pages[pageIndex + 1]) {
+      setPageIndex(pageIndex + 1);
+      setListError("");
+      return;
+    }
+
+    const cursor = pages[pageIndex]?.nextCursor;
+    if (!cursor) return;
+    setListLoading(true);
+    setListError("");
+    try {
+      const page = await fetchUsers(cursor);
+      setPages((current) => [...current, page]);
+      setPageIndex(pageIndex + 1);
+    } catch (cause) {
+      setListError(cause instanceof Error ? cause.message : "Could not connect to the API. Check that the Go backend is running.");
+    } finally {
+      setListLoading(false);
+    }
+  }, [listLoading, pageIndex, pages]);
+
+  const previousPage = useCallback(() => {
+    if (pageIndex === 0) return;
+    setPageIndex(pageIndex - 1);
+    setListError("");
+  }, [pageIndex]);
+
+  const retryUsers = pages.length === 0 ? loadFirstPage : nextPage;
+  const availableUsers = pages[pageIndex]?.userIds ?? [];
+  const hasNextPage = Boolean(pages[pageIndex + 1] || pages[pageIndex]?.nextCursor);
+  const pageNumber = pages.length ? pageIndex + 1 : 0;
+
   const resetResults = useCallback(() => {
+    setStatsMode("selected");
     setStats([]);
     setMissingUsers([]);
     setHasQueried(false);
@@ -91,6 +127,7 @@ export function useUserQuery() {
   const querySelectedUsers = useCallback(async () => {
     if (!selectedUsers.length) return;
 
+    setStatsMode("selected");
     setQuerying(true);
     setQueryError("");
     setStats([]);
@@ -109,21 +146,79 @@ export function useUserQuery() {
     }
   }, [selectedUsers]);
 
+  const browseAllStats = useCallback(async () => {
+    setStatsMode("all");
+    if (allStatsPages.length) return;
+    setAllStatsLoading(true);
+    setAllStatsError("");
+    try {
+      const page = await fetchAllUserStats();
+      setAllStatsPages([page]);
+      setAllStatsPageIndex(0);
+    } catch (cause) {
+      setAllStatsError(cause instanceof Error ? cause.message : "Could not load user statistics.");
+    } finally {
+      setAllStatsLoading(false);
+    }
+  }, [allStatsPages.length]);
+
+  const nextAllStatsPage = useCallback(async () => {
+    if (allStatsLoading) return;
+    if (allStatsPages[allStatsPageIndex + 1]) {
+      setAllStatsPageIndex(allStatsPageIndex + 1);
+      setAllStatsError("");
+      return;
+    }
+    const cursor = allStatsPages[allStatsPageIndex]?.nextCursor;
+    if (!cursor) return;
+    setAllStatsLoading(true);
+    setAllStatsError("");
+    try {
+      const page = await fetchAllUserStats(cursor);
+      setAllStatsPages((current) => [...current, page]);
+      setAllStatsPageIndex(allStatsPageIndex + 1);
+    } catch (cause) {
+      setAllStatsError(cause instanceof Error ? cause.message : "Could not load user statistics.");
+    } finally {
+      setAllStatsLoading(false);
+    }
+  }, [allStatsLoading, allStatsPageIndex, allStatsPages]);
+
+  const previousAllStatsPage = useCallback(() => {
+    if (allStatsPageIndex === 0) return;
+    setAllStatsPageIndex(allStatsPageIndex - 1);
+    setAllStatsError("");
+  }, [allStatsPageIndex]);
+
+  const showingAllStats = statsMode === "all";
+  const currentAllStatsPage = allStatsPages[allStatsPageIndex];
+
   return {
     availableUsers,
+    browseAllStats,
     clearSelection,
-    hasQueried,
+    hasQueried: showingAllStats ? Boolean(currentAllStatsPage) : hasQueried,
+    hasNextPage,
     listError,
     listLoading,
-    loadUsers,
-    missingUsers,
-    nextCursor,
-    querying,
-    queryError,
+    missingUsers: showingAllStats ? [] : missingUsers,
+    nextAllStatsPage,
+    nextPage,
+    pageNumber,
+    previousPage,
+    previousAllStatsPage,
+    querying: showingAllStats ? allStatsLoading : querying,
+    queryError: showingAllStats ? allStatsError : queryError,
     querySelectedUsers,
+    retryUsers,
+    retryAllStats: allStatsPages.length ? nextAllStatsPage : browseAllStats,
     selectUsers,
     selectedUsers,
-    stats,
+    showingAllStats,
+    showSelectedStats: () => setStatsMode("selected"),
+    stats: showingAllStats ? currentAllStatsPage?.users ?? [] : stats,
+    statsHasNextPage: Boolean(allStatsPages[allStatsPageIndex + 1] || currentAllStatsPage?.nextCursor),
+    statsPageNumber: currentAllStatsPage ? allStatsPageIndex + 1 : 0,
     toggleUser,
   };
 }

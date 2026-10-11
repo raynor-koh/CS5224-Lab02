@@ -14,20 +14,24 @@ import { MAX_SELECTED_USERS } from "@/types/users";
 
 type BuildQueryProps = {
   availableUsers: string[];
+  hasNextPage: boolean;
   listError: string;
   listLoading: boolean;
-  loadUsers: (cursor?: string) => Promise<void>;
-  nextCursor: string;
   onClearSelection: () => void;
+  onNextPage: () => void;
+  onPreviousPage: () => void;
   onQuery: () => void;
   onSelectUsers: (userIds: string[]) => void;
   onToggleUser: (userId: string) => void;
+  onRetryUsers: () => void;
+  pageNumber: number;
   querying: boolean;
   selectedUsers: string[];
 };
 
-export function BuildQuery({ availableUsers, listError, listLoading, loadUsers, nextCursor,
-  onClearSelection, onQuery, onSelectUsers, onToggleUser, querying, selectedUsers }: BuildQueryProps) {
+export function BuildQuery({ availableUsers, hasNextPage, listError, listLoading,
+  onClearSelection, onNextPage, onPreviousPage, onQuery, onRetryUsers, onSelectUsers,
+  onToggleUser, pageNumber, querying, selectedUsers }: BuildQueryProps) {
   const [search, setSearch] = useState("");
   const visibleUsers = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -53,10 +57,11 @@ export function BuildQuery({ availableUsers, listError, listLoading, loadUsers, 
             <AlertTitle>Could not load users</AlertTitle>
             <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
               <span>{listError}</span>
-              <Button type="button" variant="outline" size="sm" onClick={() => void loadUsers()}>Retry</Button>
+              <Button type="button" variant="outline" size="sm" onClick={onRetryUsers} disabled={listLoading}>Retry</Button>
             </AlertDescription>
           </Alert>
-        ) : (
+        ) : null}
+        {(pageNumber > 0 || !listError) && (
           <Collapsible className="user-picker">
             <CollapsibleTrigger asChild>
               <Button type="button" variant="outline" className="picker-trigger">
@@ -68,7 +73,7 @@ export function BuildQuery({ availableUsers, listError, listLoading, loadUsers, 
               <div className="picker-toolbar">
                 <div className="search-field">
                   <Search className="size-4 text-muted-foreground" aria-hidden="true" />
-                  <Input type="search" aria-label="Filter loaded user IDs" placeholder="Filter loaded user IDs"
+                  <Input type="search" aria-label="Filter user IDs on this page" placeholder="Filter this page"
                     value={search} onChange={(event) => setSearch(event.target.value)} />
                 </div>
                 <div className="picker-actions">
@@ -86,14 +91,17 @@ export function BuildQuery({ availableUsers, listError, listLoading, loadUsers, 
                     <label htmlFor={optionId} className="user-option-label">{userId}</label>
                   </div>;
                 })}
-                {!visibleUsers.length && !listLoading && <p className="option-message">No matching users in the loaded pages.</p>}
+                {!visibleUsers.length && !listLoading && <p className="option-message">No matching users on this page.</p>}
                 {listLoading && availableUsers.length === 0 && <div className="loading-options"><Skeleton className="h-5 w-2/3" /><Skeleton className="h-5 w-1/2" /><Skeleton className="h-5 w-3/4" /></div>}
               </div>
               <div className="picker-footer">
-                <span>{availableUsers.length.toLocaleString()} user IDs loaded</span>
-                {nextCursor ? <Button type="button" variant="link" size="sm" onClick={() => void loadUsers(nextCursor)} disabled={listLoading}>
-                  {listLoading ? "Loading…" : "Load more users →"}
-                </Button> : <span>All user IDs loaded</span>}
+                <span>Page {pageNumber || 1} · {availableUsers.length.toLocaleString()} users</span>
+                <div className="picker-pagination">
+                  <Button type="button" variant="outline" size="sm" onClick={onPreviousPage} disabled={pageNumber <= 1 || listLoading}>Previous</Button>
+                  <Button type="button" variant="outline" size="sm" onClick={onNextPage} disabled={!hasNextPage || listLoading}>
+                    {listLoading && pageNumber > 0 ? "Loading…" : "Next"}
+                  </Button>
+                </div>
               </div>
             </CollapsibleContent>
           </Collapsible>
