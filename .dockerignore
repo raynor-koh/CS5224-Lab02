@@ -1,0 +1,9 @@
+.git
+.agents
+.aws
+.codex
+.env
+.venv
+frontend/node_modules
+frontend/.next
+data/expected_user_stats.csv

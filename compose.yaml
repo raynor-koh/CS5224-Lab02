@@ -1,0 +1,42 @@
+services:
+  floci-gcp:
+    image: floci/floci-gcp:latest
+    ports:
+      - "4588:4588"
+
+  backend:
+    build:
+      context: ./backend
+    depends_on:
+      - floci-gcp
+    environment:
+      PORT: "8080"
+      FRONTEND_ORIGIN: http://localhost:3000
+      GCP_PROJECT_ID: floci-local
+      FIRESTORE_COLLECTION: userStats
+      FIRESTORE_EMULATOR_HOST: floci-gcp:4588
+      PROCESSING_API_TOKEN: local-development-token
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8080
+    ports:
+      - "3000:3000"
+
+  spark-job:
+    build:
+      context: .
+      dockerfile: backend/jobs/Dockerfile.local
+    profiles: ["processing"]
+    depends_on:
+      - floci-gcp
+    environment:
+      FIRESTORE_EMULATOR_HOST: floci-gcp:4588
+    volumes:
+      - ./data:/workspace/data:ro
