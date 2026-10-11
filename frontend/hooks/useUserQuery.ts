@@ -38,8 +38,23 @@ export function useUserQuery() {
   }, []);
 
   useEffect(() => {
-    void loadUsers();
-  }, [loadUsers]);
+    let active = true;
+    void fetchUsers()
+      .then((page) => {
+        if (!active) return;
+        setAvailableUsers(page.userIds);
+        setNextCursor(page.nextCursor ?? "");
+        setListError("");
+      })
+      .catch((cause: unknown) => {
+        if (!active) return;
+        setListError(cause instanceof Error ? cause.message : "Could not connect to the API. Check that the Go backend is running.");
+      })
+      .finally(() => {
+        if (active) setListLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
 
   const resetResults = useCallback(() => {
     setStats([]);
