@@ -2,7 +2,6 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { UserStats } from "@/types/users";
 
 type UserStatisticsProps = {
@@ -27,15 +26,11 @@ export function UserStatistics({ hasQueried, missingUsers, queryError, querying,
       </CardContent></Card>}
       {!querying && !queryError && !hasQueried && <Card className="empty-card"><CardContent>Select one or more users, then run your query to see their statistics.</CardContent></Card>}
       {!querying && !queryError && hasQueried && stats.length === 0 && missingUsers.length === 0 && <Card className="empty-card"><CardContent>No statistics were returned for this selection.</CardContent></Card>}
-      {!querying && stats.length > 0 && <Card className="results-card"><CardContent className="results-table-wrap">
-        <Table>
-          <TableHeader><TableRow><TableHead scope="col">User ID</TableHead><TableHead scope="col" className="numeric-cell">Followers</TableHead><TableHead scope="col" className="numeric-cell">Followees</TableHead></TableRow></TableHeader>
-          <TableBody>{stats.map((user) => <TableRow key={user.userId}>
-            <TableCell className="user-id-cell" title={user.userId}>{user.userId}</TableCell>
-            <TableCell className="numeric-cell">{Number(user.followers).toLocaleString()}</TableCell>
-            <TableCell className="numeric-cell">{Number(user.followees).toLocaleString()}</TableCell>
-          </TableRow>)}</TableBody>
-        </Table>
+      {!querying && stats.length > 0 && <Card className="results-card"><CardContent className="statistics-list">
+        {stats.map((user) => <article className="statistics-user" key={user.userId}>
+          <p><strong>{user.userId}</strong> has <strong>{Number(user.followers).toLocaleString()}</strong> followers</p>
+          <p><strong>{user.userId}</strong> has <strong>{Number(user.followees).toLocaleString()}</strong> followees</p>
+        </article>)}
       </CardContent></Card>}
       {hasQueried && missingUsers.length > 0 && <Alert className="missing-alert" role="status"><AlertTitle>Statistics unavailable</AlertTitle><AlertDescription>No stored statistics for: {missingUsers.join(", ")}</AlertDescription></Alert>}
       <p className="definition-note">A followee is a user followed by the selected user.</p>
