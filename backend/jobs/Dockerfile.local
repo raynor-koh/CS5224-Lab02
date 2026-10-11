@@ -1,0 +1,12 @@
+FROM python:3.11-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openjdk-17-jre-headless \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir pyspark==3.5.7 "google-cloud-firestore>=2.16,<3"
+
+WORKDIR /workspace
+COPY backend/jobs/process.py /app/process.py
+
+ENTRYPOINT ["spark-submit", "--master", "local[*]", "/app/process.py"]
+CMD ["file:///workspace/data/twitter_combined.txt", "floci-local", "userStats"]
