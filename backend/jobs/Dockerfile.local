@@ -5,9 +5,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
-COPY backend/jobs/requirements-gcp.txt /app/requirements-gcp.txt
-RUN pip install --no-cache-dir pyspark==3.5.7 -r /app/requirements-gcp.txt
+COPY backend/jobs/requirements-aws.txt /app/requirements-aws.txt
+RUN pip install --no-cache-dir pyspark==3.5.7 -r /app/requirements-aws.txt
 COPY backend/jobs/process.py /app/process.py
 
 ENTRYPOINT ["spark-submit", "--master", "local[*]", "/app/process.py"]
-CMD ["file:///workspace/data/twitter_combined.txt", "floci-local", "userStats"]
+CMD ["file:///workspace/data/twitter_combined.txt", "userStats"]

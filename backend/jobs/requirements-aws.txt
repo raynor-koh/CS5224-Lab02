@@ -1,0 +1,2 @@
+# Used by the EMR Serverless Spark job to write statistics to DynamoDB.
+boto3>=1.35,<2

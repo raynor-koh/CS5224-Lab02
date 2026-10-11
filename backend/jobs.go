@@ -6,31 +6,24 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
-	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/emrserverless"
+	"github.com/aws/aws-sdk-go-v2/service/emrserverless/types"
 	"github.com/gin-gonic/gin"
 )
 
-var jobIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,61}[a-z0-9]$`)
+var jobIDPattern = regexp.MustCompile(`^[a-zA-Z0-9-]{1,64}$`)
 
-type processingConfig struct {
-	token string
-}
-
-type processingJob struct {
-	ID      string
-	State   string
-	Details string
-}
+type processingConfig struct{ token string }
+type processingJob struct{ ID, State, Details string }
 
 type jobRunner interface {
 	Configured() bool
@@ -42,24 +35,22 @@ func processingConfigFromEnvironment() processingConfig {
 	return processingConfig{token: os.Getenv("PROCESSING_API_TOKEN")}
 }
 
-func registerJobRoutes(router *gin.Engine, config processingConfig) {
-	runner := newGCPJobRunner()
-
-	jobs := router.Group("/api/jobs", requireJobToken(config.token))
+func registerJobRoutes(router *gin.Engine, processing processingConfig) {
+	runner := newEMRServerlessJobRunner()
+	jobs := router.Group("/api/jobs", requireJobToken(processing.token))
 	jobs.POST("", func(c *gin.Context) {
 		if !runner.Configured() {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "processing job is not configured"})
 			return
 		}
-		job, startErr := runner.Start(c.Request.Context())
-		if startErr != nil {
-			log.Printf("start processing job: %v", startErr)
+		job, err := runner.Start(c.Request.Context())
+		if err != nil {
+			log.Printf("start processing job: %v", err)
 			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to start processing job"})
 			return
 		}
 		c.JSON(http.StatusAccepted, gin.H{"jobId": job.ID, "state": job.State, "stateDetails": job.Details})
 	})
-
 	jobs.GET("/:jobID", func(c *gin.Context) {
 		if !runner.Configured() {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "processing job is not configured"})
@@ -70,9 +61,9 @@ func registerJobRoutes(router *gin.Engine, config processingConfig) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid job ID"})
 			return
 		}
-		job, getErr := runner.Get(c.Request.Context(), jobID)
-		if getErr != nil {
-			log.Printf("get processing job %s: %v", jobID, getErr)
+		job, err := runner.Get(c.Request.Context(), jobID)
+		if err != nil {
+			log.Printf("get processing job %s: %v", jobID, err)
 			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to retrieve processing job"})
 			return
 		}
@@ -99,76 +90,70 @@ func requireJobToken(expected string) gin.HandlerFunc {
 	}
 }
 
-// gcpJobRunner submits PySpark batches to Serverless for Apache Spark. The
-// backend image must contain the gcloud CLI; Cloud Run service-account identity
-// supplies credentials instead of a downloaded key file.
-type gcpJobRunner struct {
-	projectID     string
-	region        string
-	entryPoint    string
-	inputURI      string
-	stagingBucket string
-	pyFiles       string
-	collection    string
+type emrServerlessJobRunner struct {
+	applicationID, entryPoint, inputURI, logURI, executionRole, table, pyFiles, sparkSubmitParameters string
 }
 
-func newGCPJobRunner() jobRunner {
-	region := os.Getenv("GCP_REGION")
-	if region == "" {
-		region = "asia-southeast1"
-	}
-	return &gcpJobRunner{
-		projectID: os.Getenv("GCP_PROJECT_ID"), region: region,
-		entryPoint: os.Getenv("PROCESSING_ENTRY_POINT"), inputURI: os.Getenv("PROCESSING_INPUT_URI"),
-		stagingBucket: os.Getenv("GCP_DATAPROC_STAGING_BUCKET"), pyFiles: os.Getenv("PROCESSING_PY_FILES"), collection: firestoreCollection(),
+func newEMRServerlessJobRunner() jobRunner {
+	return &emrServerlessJobRunner{
+		applicationID: os.Getenv("EMR_SERVERLESS_APPLICATION_ID"),
+		entryPoint:    os.Getenv("PROCESSING_ENTRY_POINT"),
+		inputURI:      os.Getenv("PROCESSING_INPUT_URI"), logURI: os.Getenv("PROCESSING_LOG_URI"),
+		executionRole: os.Getenv("EMR_SERVERLESS_EXECUTION_ROLE_ARN"), table: dynamoDBTable(),
+		pyFiles: os.Getenv("PROCESSING_PY_FILES"), sparkSubmitParameters: os.Getenv("PROCESSING_SPARK_SUBMIT_PARAMETERS"),
 	}
 }
 
-func (r *gcpJobRunner) Configured() bool {
-	return r.projectID != "" && r.entryPoint != "" && r.inputURI != "" && r.stagingBucket != "" && r.pyFiles != ""
+func (r *emrServerlessJobRunner) Configured() bool {
+	return r.applicationID != "" && r.entryPoint != "" && r.inputURI != "" && r.logURI != "" && r.executionRole != ""
 }
 
-func (r *gcpJobRunner) Start(ctx context.Context) (processingJob, error) {
-	token := make([]byte, 8)
+func (r *emrServerlessJobRunner) client(ctx context.Context) (*emrserverless.Client, error) {
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(awsRegion()))
+	if err != nil {
+		return nil, fmt.Errorf("load AWS configuration: %w", err)
+	}
+	return emrserverless.NewFromConfig(cfg), nil
+}
+
+func (r *emrServerlessJobRunner) Start(ctx context.Context) (processingJob, error) {
+	client, err := r.client(ctx)
+	if err != nil {
+		return processingJob{}, err
+	}
+	token := make([]byte, 16)
 	if _, err := rand.Read(token); err != nil {
-		return processingJob{}, fmt.Errorf("generate Dataproc batch ID: %w", err)
+		return processingJob{}, fmt.Errorf("generate EMR client token: %w", err)
 	}
-	batchID := "twitter-" + hex.EncodeToString(token)
-	var response struct {
-		State        string `json:"state"`
-		StateMessage string `json:"stateMessage"`
+	sparkParameters := r.sparkSubmitParameters
+	if r.pyFiles != "" {
+		sparkParameters = strings.TrimSpace(sparkParameters + " --py-files " + r.pyFiles)
 	}
-	err := runGCloud(ctx, &response, "dataproc", "batches", "submit", "pyspark", r.entryPoint,
-		"--batch", batchID, "--project", r.projectID, "--region", r.region,
-		"--deps-bucket", r.stagingBucket, "--py-files", r.pyFiles, "--", r.inputURI, r.projectID, r.collection)
+	output, err := client.StartJobRun(ctx, &emrserverless.StartJobRunInput{
+		ApplicationId: aws.String(r.applicationID), ClientToken: aws.String(hex.EncodeToString(token)),
+		ExecutionRoleArn: aws.String(r.executionRole), Name: aws.String("twitter-user-stats"),
+		JobDriver: &types.JobDriverMemberSparkSubmit{Value: types.SparkSubmit{
+			EntryPoint: aws.String(r.entryPoint), EntryPointArguments: []string{r.inputURI, r.table},
+			SparkSubmitParameters: aws.String(sparkParameters),
+		}},
+		ConfigurationOverrides: &types.ConfigurationOverrides{MonitoringConfiguration: &types.MonitoringConfiguration{
+			S3MonitoringConfiguration: &types.S3MonitoringConfiguration{LogUri: aws.String(r.logURI)},
+		}},
+	})
+	if err != nil {
+		return processingJob{}, fmt.Errorf("start EMR Serverless job: %w", err)
+	}
+	return processingJob{ID: aws.ToString(output.JobRunId), State: "SUBMITTED"}, nil
+}
+
+func (r *emrServerlessJobRunner) Get(ctx context.Context, jobID string) (processingJob, error) {
+	client, err := r.client(ctx)
 	if err != nil {
 		return processingJob{}, err
 	}
-	return processingJob{ID: batchID, State: response.State, Details: response.StateMessage}, nil
-}
-
-func (r *gcpJobRunner) Get(ctx context.Context, jobID string) (processingJob, error) {
-	var response struct {
-		State        string `json:"state"`
-		StateMessage string `json:"stateMessage"`
-	}
-	if err := runGCloud(ctx, &response, "dataproc", "batches", "describe", jobID,
-		"--project", r.projectID, "--region", r.region); err != nil {
-		return processingJob{}, err
-	}
-	return processingJob{ID: jobID, State: response.State, Details: response.StateMessage}, nil
-}
-
-func runGCloud(ctx context.Context, response any, args ...string) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	args = append(args, "--format=json", "--quiet")
-	output, err := exec.CommandContext(ctx, "gcloud", args...).CombinedOutput()
+	output, err := client.GetJobRun(ctx, &emrserverless.GetJobRunInput{ApplicationId: aws.String(r.applicationID), JobRunId: aws.String(jobID)})
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return errors.New("gcloud timed out")
-		}
-		return fmt.Errorf("gcloud failed: %w: %s", err, strings.TrimSpace(string(output)))
+		return processingJob{}, fmt.Errorf("get EMR Serverless job: %w", err)
 	}
-	return json.Unmarshal(output, response)
+	return processingJob{ID: jobID, State: string(output.JobRun.State), Details: aws.ToString(output.JobRun.StateDetails)}, nil
 }

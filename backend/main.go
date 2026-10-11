@@ -13,9 +13,9 @@ import (
 )
 
 type UserStats struct {
-	UserID    string `json:"userId" firestore:"userId"`
-	Followers int64  `json:"followers" firestore:"followers"`
-	Followees int64  `json:"followees" firestore:"followees"`
+	UserID    string `json:"userId" dynamodbav:"userId"`
+	Followers int64  `json:"followers" dynamodbav:"followers"`
+	Followees int64  `json:"followees" dynamodbav:"followees"`
 }
 
 func main() {

@@ -9,10 +9,12 @@ import (
 	"strconv"
 	"unicode/utf8"
 
-	"cloud.google.com/go/firestore"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/gin-gonic/gin"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // statsStore keeps the HTTP API independent of the cloud database provider.
@@ -23,18 +25,48 @@ type statsStore interface {
 	GetStat(context.Context, string) (UserStats, bool, error)
 }
 
-func newStatsStore(ctx context.Context) (statsStore, func() error, error) {
-	return newFirestoreStore(ctx, gcpProjectID(), firestoreCollection())
+type dynamoDBStore struct {
+	client *dynamodb.Client
+	table  string
 }
 
-func firestoreCollection() string {
-	if collection := os.Getenv("FIRESTORE_COLLECTION"); collection != "" {
-		return collection
+func dynamoDBTable() string {
+	if table := os.Getenv("DYNAMODB_TABLE"); table != "" {
+		return table
 	}
 	return "userStats"
 }
 
-// A cursor is a user ID encoded for safe use in a URL. Stores sort by user ID.
+func awsRegion() string {
+	if region := os.Getenv("AWS_REGION"); region != "" {
+		return region
+	}
+	return "ap-southeast-1"
+}
+
+func newStatsStore(ctx context.Context) (statsStore, func() error, error) {
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(awsRegion()))
+	if err != nil {
+		return nil, nil, fmt.Errorf("load AWS configuration: %w", err)
+	}
+	endpoint := awsEndpointURL()
+	client := dynamodb.NewFromConfig(cfg, func(options *dynamodb.Options) {
+		if endpoint != "" {
+			options.BaseEndpoint = aws.String(endpoint)
+		}
+	})
+	return &dynamoDBStore{client: client, table: dynamoDBTable()}, func() error { return nil }, nil
+}
+
+func awsEndpointURL() string {
+	if endpoint := os.Getenv("AWS_ENDPOINT_URL"); endpoint != "" {
+		return endpoint
+	}
+	return os.Getenv("DYNAMODB_ENDPOINT_URL")
+}
+
+// scanPage validates shared list-query parameters. DynamoDB cursors are
+// encoded primary keys rather than user-facing identifiers.
 func scanPage(c *gin.Context) (int, string, bool) {
 	limit := 100
 	if rawLimit := c.Query("limit"); rawLimit != "" {
@@ -66,28 +98,7 @@ func pageCursor(lastID string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(lastID))
 }
 
-type firestoreStore struct {
-	client     *firestore.Client
-	collection *firestore.CollectionRef
-}
-
-func gcpProjectID() string {
-	return os.Getenv("GCP_PROJECT_ID")
-}
-
-func newFirestoreStore(ctx context.Context, projectID, collection string) (statsStore, func() error, error) {
-	if projectID == "" {
-		return nil, nil, fmt.Errorf("GCP_PROJECT_ID is required")
-	}
-	client, err := firestore.NewClient(ctx, projectID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create Firestore client: %w", err)
-	}
-	store := &firestoreStore{client: client, collection: client.Collection(collection)}
-	return store, client.Close, nil
-}
-
-func (s *firestoreStore) ListUserIDs(ctx context.Context, limit int, cursor string) ([]string, string, error) {
+func (s *dynamoDBStore) ListUserIDs(ctx context.Context, limit int, cursor string) ([]string, string, error) {
 	records, next, err := s.list(ctx, limit, cursor)
 	if err != nil {
 		return nil, "", err
@@ -99,71 +110,76 @@ func (s *firestoreStore) ListUserIDs(ctx context.Context, limit int, cursor stri
 	return ids, next, nil
 }
 
-func (s *firestoreStore) ListStats(ctx context.Context, limit int, cursor string) ([]UserStats, string, error) {
+func (s *dynamoDBStore) ListStats(ctx context.Context, limit int, cursor string) ([]UserStats, string, error) {
 	return s.list(ctx, limit, cursor)
 }
 
-func (s *firestoreStore) list(ctx context.Context, limit int, cursor string) ([]UserStats, string, error) {
-	query := s.collection.OrderBy("userId", firestore.Asc).Limit(limit + 1)
+// DynamoDB Scan cursors are the table's primary key. A Scan has no ordering
+// guarantee, so callers must treat list results and cursors as opaque.
+func (s *dynamoDBStore) list(ctx context.Context, limit int, cursor string) ([]UserStats, string, error) {
+	var startKey map[string]types.AttributeValue
 	if cursor != "" {
-		query = query.StartAfter(cursor)
+		startKey = map[string]types.AttributeValue{"userId": &types.AttributeValueMemberS{Value: cursor}}
 	}
-	documents, err := query.Documents(ctx).GetAll()
+	output, err := s.client.Scan(ctx, &dynamodb.ScanInput{
+		TableName:         aws.String(s.table),
+		Limit:             aws.Int32(int32(limit)),
+		ExclusiveStartKey: startKey,
+	})
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("scan DynamoDB table: %w", err)
 	}
-	hasNext := len(documents) > limit
-	if hasNext {
-		documents = documents[:limit]
-	}
-	records := make([]UserStats, 0, len(documents))
-	for _, document := range documents {
+	records := make([]UserStats, 0, len(output.Items))
+	for _, item := range output.Items {
 		var record UserStats
-		if err := document.DataTo(&record); err != nil {
-			return nil, "", fmt.Errorf("decode Firestore user statistics: %w", err)
+		if err := attributevalue.UnmarshalMap(item, &record); err != nil {
+			return nil, "", fmt.Errorf("decode DynamoDB user statistics: %w", err)
 		}
 		records = append(records, record)
 	}
-	if hasNext && len(records) > 0 {
-		return records, pageCursor(records[len(records)-1].UserID), nil
+	if key, ok := output.LastEvaluatedKey["userId"].(*types.AttributeValueMemberS); ok {
+		return records, pageCursor(key.Value), nil
 	}
 	return records, "", nil
 }
 
-func (s *firestoreStore) GetStats(ctx context.Context, ids []string) ([]UserStats, error) {
-	references := make([]*firestore.DocumentRef, 0, len(ids))
+func (s *dynamoDBStore) GetStats(ctx context.Context, ids []string) ([]UserStats, error) {
+	keys := make([]map[string]types.AttributeValue, 0, len(ids))
 	for _, id := range ids {
-		references = append(references, s.collection.Doc(id))
+		keys = append(keys, map[string]types.AttributeValue{"userId": &types.AttributeValueMemberS{Value: id}})
 	}
-	documents, err := s.client.GetAll(ctx, references)
+	output, err := s.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{
+		RequestItems: map[string]types.KeysAndAttributes{s.table: {Keys: keys}},
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("batch get DynamoDB user statistics: %w", err)
 	}
-	records := make([]UserStats, 0, len(documents))
-	for _, document := range documents {
-		if !document.Exists() {
-			continue
-		}
+	items := output.Responses[s.table]
+	records := make([]UserStats, 0, len(items))
+	for _, item := range items {
 		var record UserStats
-		if err := document.DataTo(&record); err != nil {
-			return nil, fmt.Errorf("decode Firestore user statistics: %w", err)
+		if err := attributevalue.UnmarshalMap(item, &record); err != nil {
+			return nil, fmt.Errorf("decode DynamoDB user statistics: %w", err)
 		}
 		records = append(records, record)
 	}
 	return records, nil
 }
 
-func (s *firestoreStore) GetStat(ctx context.Context, id string) (UserStats, bool, error) {
-	document, err := s.collection.Doc(id).Get(ctx)
-	if status.Code(err) == codes.NotFound {
+func (s *dynamoDBStore) GetStat(ctx context.Context, id string) (UserStats, bool, error) {
+	output, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.table),
+		Key:       map[string]types.AttributeValue{"userId": &types.AttributeValueMemberS{Value: id}},
+	})
+	if err != nil {
+		return UserStats{}, false, fmt.Errorf("get DynamoDB user statistic: %w", err)
+	}
+	if len(output.Item) == 0 {
 		return UserStats{}, false, nil
 	}
-	if err != nil {
-		return UserStats{}, false, err
-	}
 	var record UserStats
-	if err := document.DataTo(&record); err != nil {
-		return UserStats{}, false, fmt.Errorf("decode Firestore user statistics: %w", err)
+	if err := attributevalue.UnmarshalMap(output.Item, &record); err != nil {
+		return UserStats{}, false, fmt.Errorf("decode DynamoDB user statistic: %w", err)
 	}
 	return record, true, nil
 }

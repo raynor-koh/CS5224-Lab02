@@ -1,20 +1,60 @@
 services:
-  floci-gcp:
-    image: floci/floci-gcp:latest
+  floci:
+    image: floci/floci:latest
     ports:
-      - "4588:4588"
+      - "4566:4566"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data/floci:/app/data
+    environment:
+      FLOCI_STORAGE_MODE: hybrid
+      FLOCI_HOSTNAME: floci
+      # Run the dashboard below as a managed Compose service instead.
+      FLOCI_SERVICES_UI_ENABLED: "false"
+
+  floci-ui:
+    image: floci/floci-ui:latest
+    depends_on:
+      - floci
+    ports:
+      - "4500:4500"
+    environment:
+      # Docker Compose service DNS; do not use localhost here.
+      FLOCI_ENDPOINT: http://floci:4566
+      # Must match the region used by aws-init to create userStats.
+      AWS_REGION: ap-southeast-1
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+
+  aws-init:
+    image: amazon/aws-cli:latest
+    depends_on:
+      - floci
+    environment:
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_ENDPOINT_URL: http://floci:4566
+    entrypoint: ["/bin/sh", "/scripts/init-dynamodb.sh"]
+    volumes:
+      - ./scripts/init-dynamodb.sh:/scripts/init-dynamodb.sh:ro
+      - ./data:/input:ro
 
   backend:
     build:
       context: ./backend
     depends_on:
-      - floci-gcp
+      aws-init:
+        condition: service_completed_successfully
     environment:
       PORT: "8080"
       FRONTEND_ORIGIN: http://localhost:3000
-      GCP_PROJECT_ID: floci-local
-      FIRESTORE_COLLECTION: userStats
-      FIRESTORE_EMULATOR_HOST: floci-gcp:4588
+      AWS_REGION: ap-southeast-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      DYNAMODB_TABLE: userStats
+      AWS_ENDPOINT_URL: http://floci:4566
       PROCESSING_API_TOKEN: local-development-token
     ports:
       - "8080:8080"
@@ -35,8 +75,13 @@ services:
       dockerfile: backend/jobs/Dockerfile.local
     profiles: ["processing"]
     depends_on:
-      - floci-gcp
+      aws-init:
+        condition: service_completed_successfully
     environment:
-      FIRESTORE_EMULATOR_HOST: floci-gcp:4588
+      AWS_REGION: ap-southeast-1
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_ENDPOINT_URL: http://floci:4566
     volumes:
       - ./data:/workspace/data:ro
