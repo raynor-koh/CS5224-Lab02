@@ -91,7 +91,7 @@ func requireJobToken(expected string) gin.HandlerFunc {
 }
 
 type emrServerlessJobRunner struct {
-	applicationID, entryPoint, inputURI, logURI, executionRole, table, pyFiles, sparkSubmitParameters string
+	applicationID, entryPoint, inputURI, logURI, executionRole, table, archives, sparkSubmitParameters string
 }
 
 func newEMRServerlessJobRunner() jobRunner {
@@ -100,7 +100,7 @@ func newEMRServerlessJobRunner() jobRunner {
 		entryPoint:    os.Getenv("PROCESSING_ENTRY_POINT"),
 		inputURI:      os.Getenv("PROCESSING_INPUT_URI"), logURI: os.Getenv("PROCESSING_LOG_URI"),
 		executionRole: os.Getenv("EMR_SERVERLESS_EXECUTION_ROLE_ARN"), table: dynamoDBTable(),
-		pyFiles: os.Getenv("PROCESSING_PY_FILES"), sparkSubmitParameters: os.Getenv("PROCESSING_SPARK_SUBMIT_PARAMETERS"),
+		archives: os.Getenv("PROCESSING_ARCHIVES"), sparkSubmitParameters: os.Getenv("PROCESSING_SPARK_SUBMIT_PARAMETERS"),
 	}
 }
 
@@ -126,8 +126,11 @@ func (r *emrServerlessJobRunner) Start(ctx context.Context) (processingJob, erro
 		return processingJob{}, fmt.Errorf("generate EMR client token: %w", err)
 	}
 	sparkParameters := r.sparkSubmitParameters
-	if r.pyFiles != "" {
-		sparkParameters = strings.TrimSpace(sparkParameters + " --py-files " + r.pyFiles)
+	if r.archives != "" {
+		sparkParameters = strings.TrimSpace(sparkParameters +
+			" --conf spark.archives=" + r.archives +
+			" --conf spark.emr-serverless.driverEnv.PYTHONPATH=./python-deps" +
+			" --conf spark.executorEnv.PYTHONPATH=./python-deps")
 	}
 	output, err := client.StartJobRun(ctx, &emrserverless.StartJobRunInput{
 		ApplicationId: aws.String(r.applicationID), ClientToken: aws.String(hex.EncodeToString(token)),

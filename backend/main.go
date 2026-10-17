@@ -30,6 +30,7 @@ func main() {
 	router := gin.Default()
 	router.Use(frontendCORS())
 	router.OPTIONS("/*path", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	router.GET("/health", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	registerUserRoutes(router, store)
 	registerJobRoutes(router, processingConfigFromEnvironment())
 
