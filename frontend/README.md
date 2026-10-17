@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Frontend
 
-## Getting Started
+This Next.js application displays user IDs and follower/followee statistics
+from the Go API.
 
-First, run the development server:
+## Run locally
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+From the repository root, use Docker Compose to start the frontend, API, and
+local AWS emulator together:
+
+```sh
+docker compose up --build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open <http://localhost:3000>. To run the frontend directly, install the
+workspace dependencies and set the API URL before starting Next.js:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```sh
+pnpm install
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Create `frontend/.env.local` with:
 
-## Learn More
+```text
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
+```
 
-To learn more about Next.js, take a look at the following resources:
+Then run `pnpm --dir frontend dev` from the repository root (or `pnpm dev`
+from this directory). The Go API must be reachable at that URL, and its
+`FRONTEND_ORIGIN` must match the page origin for browser requests to pass CORS.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Deploy to ECS
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The frontend Docker image runs a production Next.js build and listens on port
+`3000`. `NEXT_PUBLIC_API_BASE_URL` is embedded into the browser JavaScript at
+build time. Pass the backend's HTTPS Application URL when building the image;
+setting it only in the ECS runtime environment does not change the client
+bundle.
 
-## Deploy on Vercel
+From the repository root, build, tag, and push the image (replace the account
+ID, region, and backend URL as needed):
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```powershell
+$Region = "ap-southeast-1"
+$AccountId = "YOUR_ACCOUNT_ID"
+$BackendUrl = "https://YOUR-BACKEND-APPLICATION-URL"
+$Registry = "$AccountId.dkr.ecr.$Region.amazonaws.com"
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+docker build --build-arg "NEXT_PUBLIC_API_BASE_URL=$BackendUrl" `
+  -t twitter-frontend:latest ./frontend
+docker tag twitter-frontend:latest "$Registry/twitter-frontend:latest"
+docker push "$Registry/twitter-frontend:latest"
+```
+
+Deploy the pushed image as an ECS Express Mode service on port `3000` with
+health-check path `/`. Use the task execution role for ECR image pulls and
+logging; the frontend does not need an application task role. After deploying,
+set the backend's `FRONTEND_ORIGIN` to the frontend HTTPS Application URL and
+deploy a new backend revision. If the backend URL changes, rebuild and
+redeploy the frontend image.

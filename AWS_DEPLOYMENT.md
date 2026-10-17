@@ -3,12 +3,12 @@
 This guide deploys the application in one AWS Region using managed services:
 
 ~~~text
-S3 input + PySpark script -> EMR Serverless -> DynamoDB -> Go API (App Runner) -> Next.js UI (App Runner)
+S3 input + PySpark script -> EMR Serverless -> DynamoDB -> Go API (ECS Express Mode) -> Next.js UI (ECS Express Mode)
 ~~~
 
 It is written for **Windows PowerShell** and the AWS Console. Use the same Region for every resource; this guide uses `ap-southeast-1` (Asia Pacific — Singapore). Do not use the local Floci endpoint or local AWS credentials in a deployed service.
 
-> **Cost note:** Set an AWS Budget before starting. EMR Serverless and App Runner incur charges while work or services are running. Keep EMR Serverless initial capacity at zero and delete demonstration resources afterwards.
+> **Cost note:** Set an AWS Budget before starting. EMR Serverless, ECS/Fargate, and load balancers can incur charges while resources are running. Keep EMR Serverless initial capacity at zero and delete demonstration resources afterwards.
 
 ## Prerequisites
 
@@ -18,7 +18,7 @@ It is written for **Windows PowerShell** and the AWS Console. Use the same Regio
   [python.org](https://www.python.org/downloads/windows/) and select **Install
   launcher for all users**. The commands below deliberately use the `py`
   launcher rather than an MSYS2 or Git Bash `python` on `PATH`.
-- AWS CLI v2 configured in PowerShell (`aws configure`) or AWS CloudShell.
+- AWS CLI v2 configured in PowerShell or AWS CloudShell. For an organization account, use its assigned IAM Identity Center/SSO profile. Avoid root user access keys; use an IAM role or temporary credentials with the required permissions.
 - From the repository root, PowerShell is the terminal used below.
 
 Set values once for the session. Replace the placeholders; the S3 bucket name must be globally unique and lower-case.
@@ -203,6 +203,9 @@ In **ECR** → **Private repositories**, create `twitter-backend` and `twitter-f
 From PowerShell at the repository root, build and push the backend:
 
 ~~~powershell
+aws sts get-caller-identity
+if ($LASTEXITCODE -ne 0) { throw "AWS CLI credentials are missing, expired, or invalid." }
+
 aws ecr get-login-password --region $Region |
   docker login --username AWS --password-stdin "$AccountId.dkr.ecr.$Region.amazonaws.com"
 
@@ -263,9 +266,15 @@ In **ECS** → **Express mode** → **Create**, configure the API service:
    role** if this is the first Express Mode service. ECS creates
    `ecsTaskExecutionRole` and `ecsInfrastructureRoleForExpressServices` with
    the managed policies needed to pull images and create the service resources.
+   Keep the task execution role separate from the application task role:
+   `ecsTaskExecutionRole` pulls images and writes logs; `TwitterApiTaskRole`
+   grants the running API access to DynamoDB and EMR. If ECR reports that
+   `TwitterApiTaskRole` lacks `ecr:GetAuthorizationToken`, the execution role
+   was selected incorrectly or is missing its ECR pull policy.
 3. Open **Additional configurations** and set service name `twitter-api`,
    container port `8080`, health-check path `/health`, and task role
-   `TwitterApiTaskRole`.
+   `TwitterApiTaskRole`. The API health endpoint returns HTTP `200` to match
+   the load balancer's default success code.
 4. Add these runtime environment variables, replacing placeholders:
 
 ~~~text
@@ -278,7 +287,7 @@ PROCESSING_INPUT_URI=s3://YOUR_BUCKET/data/twitter_combined.txt
 PROCESSING_LOG_URI=s3://YOUR_BUCKET/logs/
 PROCESSING_ARCHIVES=s3://YOUR_BUCKET/dependencies/boto3.zip#python-deps
 PROCESSING_SPARK_SUBMIT_PARAMETERS=--conf spark.executor.cores=1 --conf spark.executor.memory=4g --conf spark.driver.cores=1 --conf spark.driver.memory=4g --conf spark.dynamicAllocation.maxExecutors=2
-PROCESSING_API_TOKEN=USE_A_LONG_RANDOM_SECRET
+PROCESSING_API_TOKEN=STORE_AS_AN_ECS_SECRET
 ~~~
 
 5. Set compute to 0.25 vCPU and 0.5 GB memory for this coursework
@@ -286,14 +295,22 @@ PROCESSING_API_TOKEN=USE_A_LONG_RANDOM_SECRET
 6. Create the service. Once deployment is active, copy its **Application URL**;
    it is the API URL used in the frontend build.
 
-The API includes a `/health` endpoint specifically for ECS health checks. Build
-and push the backend image again after pulling the current repository changes.
+The API includes a `/health` endpoint specifically for ECS health checks.
+Set `GIN_MODE=release` for production. Store `PROCESSING_API_TOKEN` in Secrets
+Manager/Parameter Store rather than source control or plain text deployment
+notes. Build and push the backend image after code changes, then deploy a new
+service revision. When reusing the mutable `latest` tag, explicitly force or
+update the ECS deployment so tasks pull the newly pushed image; a versioned tag
+or image digest is more reliable.
 
 ## 5. Build and deploy the frontend with ECS Express Mode
 
-The checked-in frontend Dockerfile starts `next dev`, which is a development server. Before deploying, update it to make a production build and run `pnpm start`. It must also receive `NEXT_PUBLIC_API_BASE_URL` **when the image is built**, since Next.js exposes this value to browser code at build time.
+The checked-in `frontend/Dockerfile` makes a production build and runs
+`pnpm start`. It must receive `NEXT_PUBLIC_API_BASE_URL` **when the image is
+built**, since Next.js embeds this public value in browser code. Setting it
+only as an ECS runtime environment variable does not update the browser bundle.
 
-Use this `frontend/Dockerfile`:
+The Dockerfile uses this build argument:
 
 ~~~dockerfile
 FROM node:22-bookworm-slim
@@ -342,6 +359,13 @@ FRONTEND_ORIGIN=https://YOUR-FRONTEND-DEFAULT-DOMAIN
 
 Deploy the updated API revision. This matches the Go API's CORS policy to the
 frontend origin.
+
+If the page says `Set NEXT_PUBLIC_API_BASE_URL in frontend/.env.local`, the
+frontend image was built without the build argument. Rebuild with the backend
+Application URL, push the image, and deploy a new frontend revision. If the
+API URL is set but browser requests fail, verify that `FRONTEND_ORIGIN` exactly
+matches the frontend URL, including scheme and hostname, then inspect API logs
+and browser network errors.
 
 ## 6. Verify and capture submission evidence
 

@@ -1,56 +1,66 @@
-# AWS backend and Spark processing
+# Backend API and processing job
 
-The Go API reads precomputed statistics from DynamoDB. An EMR Serverless
+The Go API reads precomputed user statistics from DynamoDB. An EMR Serverless
 PySpark job reads the Twitter edge list from S3, removes duplicate edges,
 counts followers and followees, and writes one item per user to DynamoDB.
 
-~~~text
-S3 -> EMR Serverless (PySpark) -> DynamoDB -> Go API
-~~~
+```text
+S3 input -> EMR Serverless (PySpark) -> DynamoDB -> Go API
+```
 
-## API
+## API routes
 
 | Method | Path | Result |
 | --- | --- | --- |
-| GET | /api/users?limit=100&cursor=... | paginated user IDs |
-| GET | /api/users/stats?limit=100&cursor=... | paginated statistics |
-| POST | /api/users/stats | selected statistics for 1–100 user IDs |
-| GET | /api/users/:userID/stats | one user's statistics |
-| POST | /api/jobs | starts an EMR Serverless Spark run |
-| GET | /api/jobs/:jobID | returns the EMR Serverless job state |
+| GET | `/health` | HTTP 200 for container and load balancer health checks |
+| GET | `/api/users?limit=100&cursor=...` | Paginated user IDs |
+| GET | `/api/users/stats?limit=100&cursor=...` | Paginated statistics |
+| POST | `/api/users/stats` | Statistics for 1–100 user IDs |
+| GET | `/api/users/:userID/stats` | One user's statistics |
+| POST | `/api/jobs` | Starts an EMR Serverless Spark run |
+| GET | `/api/jobs/:jobID` | Returns the EMR Serverless job state |
 
-The list endpoints use DynamoDB Scan, so their order is not guaranteed and
-the returned cursor must be treated as opaque. The job routes require an
-Authorization Bearer token configured as PROCESSING_API_TOKEN.
+List routes use DynamoDB Scan. Result order is not guaranteed; treat cursors as
+opaque. Job routes require `Authorization: Bearer <token>` matching
+`PROCESSING_API_TOKEN`.
 
 ## Run locally
 
-Docker Compose starts Floci's local AWS emulator, creates a DynamoDB
-userStats table, uploads the dataset to local S3, then starts the Go API and
-Next.js frontend:
+From the repository root, start Floci, initialize its DynamoDB table and S3
+input, then start the API and frontend:
 
-~~~sh
+```sh
 docker compose up --build
-~~~
+```
 
-Open http://localhost:3000. The API runs at http://localhost:8080; Floci is
-exposed at http://localhost:4566.
+Open <http://localhost:3000>. The API listens on <http://localhost:8080> and
+Floci is available at <http://localhost:4566>. To run the local Spark
+processor after initialization:
 
-Run the one-shot Spark processor after Compose is ready:
-
-~~~sh
+```sh
 docker compose --profile processing run --rm spark-job
-~~~
+```
 
-It reads the mounted local input file and writes userStats to Floci DynamoDB.
-The initialiser also uploads the input to Floci S3 at
-s3://twitter-data/data/twitter_combined.txt, allowing the application's S3
-and DynamoDB setup to be inspected locally. EMR Serverless itself is not
-emulated; use the AWS deployment for cloud-run evidence.
+The processor reads the mounted dataset and writes statistics to Floci
+DynamoDB. EMR Serverless is not emulated locally.
 
-## AWS configuration
+For running the API outside Compose, copy `.env.example` to `.env` in the
+repository root or `backend/`. Set `AWS_ENDPOINT_URL=http://localhost:4566`
+for Floci and provide local emulator credentials. Never put real AWS keys in
+`.env` or source control. For deployed services, use an ECS task role instead
+of long-lived access keys. See [`AWS_DEPLOYMENT.md`](../AWS_DEPLOYMENT.md).
 
-Copy .env.example to .env. The backend uses the AWS SDK default credential
-chain. For any deployed backend, attach an IAM role rather than distributing
-long-lived AWS keys. See AWS_DEPLOYMENT.md for the S3, EMR Serverless,
-DynamoDB, IAM, and CloudFront setup.
+## Runtime configuration
+
+The API defaults to port `8080`, region `ap-southeast-1`, and DynamoDB table
+`userStats`. Set `FRONTEND_ORIGIN` to the exact browser origin, including
+scheme, for CORS. In ECS, set `AWS_REGION`, `DYNAMODB_TABLE`, and
+`FRONTEND_ORIGIN` as service environment variables. The ECS task role needs
+DynamoDB read permissions. The separate task execution role needs permission
+to pull the image and write logs.
+
+Set `GIN_MODE=release` in ECS for production logging. The `/health` endpoint
+returns HTTP 200, which matches the default Application Load Balancer success
+code. If health checks fail, verify the configured container port is `8080`,
+the path is `/health`, and the task is staying running; inspect stopped reason
+and container logs for startup errors.
